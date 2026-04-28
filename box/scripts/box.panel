@@ -1,0 +1,180 @@
+#!/system/bin/sh
+
+box_dir="/data/adb/box"
+panel_dir="${box_dir}/panel"
+run_dir="${box_dir}/run"
+env_file="${box_dir}/panel.env"
+pid_file="${run_dir}/panel.pid"
+log_file="${run_dir}/panel.log"
+
+PORT="7788"
+PANEL_URL="https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip"
+
+[ -f "$env_file" ] && . "$env_file"
+
+mkdir -p "$panel_dir" "$run_dir"
+
+log() {
+    echo "[boxpanel] $1"
+}
+
+is_running() {
+    [ -f "$pid_file" ] || return 1
+    pid="$(cat "$pid_file" 2>/dev/null)"
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+stop_panel() {
+    if is_running; then
+        pid="$(cat "$pid_file" 2>/dev/null)"
+        kill "$pid" 2>/dev/null
+        sleep 1
+        kill -9 "$pid" 2>/dev/null
+    fi
+
+    pkill -f "httpd.*${PORT}" 2>/dev/null
+    rm -f "$pid_file"
+}
+
+start_panel() {
+    if [ ! -f "${panel_dir}/index.html" ]; then
+        echo "错误：未找到 ${panel_dir}/index.html，请先下载/安装面板"
+        exit 1
+    fi
+
+    stop_panel
+
+    if command -v busybox >/dev/null 2>&1; then
+        busybox httpd -f -p "0.0.0.0:${PORT}" -h "$panel_dir" > "$log_file" 2>&1 &
+    elif [ -x /data/adb/magisk/busybox ]; then
+        /data/adb/magisk/busybox httpd -f -p "0.0.0.0:${PORT}" -h "$panel_dir" > "$log_file" 2>&1 &
+    else
+        echo "错误：找不到 busybox httpd"
+        exit 1
+    fi
+
+    echo "$!" > "$pid_file"
+    sleep 1
+
+    if is_running; then
+        echo "面板已启动：http://192.168.0.1:${PORT}/"
+    else
+        echo "面板启动失败"
+        cat "$log_file" 2>/dev/null
+        exit 1
+    fi
+}
+
+download_panel() {
+    tmp_zip="${run_dir}/panel.zip"
+    tmp_dir="${run_dir}/panel_tmp"
+
+    rm -rf "$tmp_zip" "$tmp_dir"
+    mkdir -p "$tmp_dir"
+
+    echo "下载面板：$PANEL_URL"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -L "$PANEL_URL" -o "$tmp_zip"
+    elif command -v wget >/dev/null 2>&1; then
+        wget "$PANEL_URL" -O "$tmp_zip"
+    else
+        echo "错误：找不到 curl 或 wget"
+        exit 1
+    fi
+
+    [ ! -s "$tmp_zip" ] && echo "下载失败：文件为空" && exit 1
+
+    unzip -o "$tmp_zip" -d "$tmp_dir" >/dev/null 2>&1 || {
+        echo "解压失败，请确认下载地址是 zip 文件"
+        exit 1
+    }
+
+    found="$(find "$tmp_dir" -name index.html | head -n 1)"
+
+    if [ -z "$found" ]; then
+        echo "错误：压缩包内未找到 index.html"
+        exit 1
+    fi
+
+    new_root="$(dirname "$found")"
+
+    rm -rf "$panel_dir"
+    mkdir -p "$panel_dir"
+    cp -rf "$new_root"/* "$panel_dir"/
+
+    rm -rf "$tmp_zip" "$tmp_dir"
+
+    echo "面板已安装到：$panel_dir"
+}
+
+set_url() {
+    [ -z "$1" ] && echo "用法: $0 set-url <url>" && exit 1
+
+    PANEL_URL="$1"
+
+    cat > "$env_file" <<EOF
+PORT="${PORT}"
+PANEL_URL="${PANEL_URL}"
+EOF
+
+    echo "已设置面板下载地址：$PANEL_URL"
+}
+
+status_panel() {
+    echo "=== BoxPanel 状态 ==="
+    echo "端口: $PORT"
+    echo "目录: $panel_dir"
+    echo "配置: $env_file"
+    echo "下载地址: $PANEL_URL"
+    echo ""
+
+    if is_running; then
+        echo "状态: 运行中"
+        echo "PID: $(cat "$pid_file" 2>/dev/null)"
+    else
+        echo "状态: 未运行"
+    fi
+
+    echo ""
+    echo "监听："
+    netstat -tulnp 2>/dev/null | grep ":${PORT}" || ss -tulnp 2>/dev/null | grep ":${PORT}" || true
+
+    echo ""
+    echo "文件："
+    ls -l "$panel_dir" 2>/dev/null | head
+}
+
+case "$1" in
+start)
+    start_panel
+;;
+
+stop)
+    stop_panel
+    echo "面板已停止"
+;;
+
+restart)
+    stop_panel
+    start_panel
+;;
+
+status)
+    status_panel
+;;
+
+download)
+    download_panel
+;;
+
+set-url)
+    set_url "$2"
+;;
+
+*)
+    echo "用法: $0 {start|stop|restart|status|download|set-url <url>}"
+    exit 1
+;;
+esac
